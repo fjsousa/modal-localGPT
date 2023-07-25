@@ -157,7 +157,7 @@ image = (
     # #Mount.from_local_dir("DB", remote_path="/root/DB")
     .run_function(presist_db_run_model, gpu="any", mounts=[Mount.from_local_dir("SOURCE_DOCUMENTS", remote_path="/root/SOURCE_DOCUMENTS")]))
 
-volume = NetworkFileSystem.persisted("modal_vol")
+volume = NetworkFileSystem.persisted("cache_volume")
 
 CACHE_PATH = "/root/.cache"
 
@@ -183,7 +183,6 @@ def modal_function():
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_cache=True)
     end = time.time()
     print("setting up Autotokenizer...", end - start)
-    #setting up Autotokenizer... 150.63580632209778
 
     start = time.time()
     model = AutoModelForCausalLM.from_pretrained(
@@ -223,8 +222,6 @@ def modal_function():
     res = qa(question)
     answer, docs = res["result"], res["source_documents"]
 
-    print(">>>> answer", answer)
-
     #print(docs)
     return answer  
 
@@ -243,5 +240,6 @@ def cli():
 @stub.function()#timeout??
 @web_endpoint()
 def get():
-    logging.info("hitting end point")
-    return modal_function.call()
+    res = modal_function.call()
+    print(">>>>", res)
+    return "Hello world"
