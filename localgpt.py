@@ -1,11 +1,25 @@
 import os
+import logging
+import time
 from modal import Image, Stub, gpu, method, web_endpoint, NetworkFileSystem, Mount
+
+import torch
 
 from langchain.docstore.document import Document
 from langchain.text_splitter import Language, RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceInstructEmbeddings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from langchain.vectorstores import Chroma
+
+from langchain.llms import HuggingFacePipeline
+from langchain.chains import RetrievalQA
+
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GenerationConfig,
+    LlamaForCausalLM,
+    LlamaTokenizer,
+    pipeline,
+)
 
 from constants import (
     CHROMA_SETTINGS,
@@ -17,6 +31,9 @@ from constants import (
 )
 
 IMAGE_MODEL_DIR = "/model"
+
+model_id = "TheBloke/vicuna-7B-1.1-HF"
+model_basename = None
 
 volume = NetworkFileSystem.persisted("model-cache-vol")
 
@@ -85,13 +102,12 @@ def split_documents(documents: list[Document]) -> tuple[list[Document], list[Doc
 
     return text_docs #, python_docs
 
-# def download_model():
-#     from huggingface_hub import snapshot_download
-
-#     model_name = "TheBloke/falcon-40b-instruct-GPTQ"
-#     snapshot_download(model_name, local_dir=IMAGE_MODEL_DIR)
 
 def presist_db_run_model():
+    from langchain.embeddings import HuggingFaceInstructEmbeddings
+    from langchain.vectorstores import Chroma
+    from transformers import AutoTokenizer
+    
     documents = load_documents(SOURCE_DIRECTORY)
     text_documents = split_documents(documents)
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -109,10 +125,8 @@ def presist_db_run_model():
         client_settings=CHROMA_SETTINGS,
     )
 
-    print(">>>>about to presist")
     db.persist()
     db = None
-
 
 image = (
     Image.debian_slim(python_version="3.10")
@@ -140,83 +154,94 @@ image = (
         "openpyxl"
     )
     #.env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
-    .run_function(presist_db_run_model, gpu="any", mounts=[Mount.from_local_dir("SOURCE_DOCUMENTS", remote_path="/root/SOURCE_DOCUMENTS"), Mount.from_local_dir("DB", remote_path="/root/DB")]))
+    # #Mount.from_local_dir("DB", remote_path="/root/DB")
+    .run_function(presist_db_run_model, gpu="any", mounts=[Mount.from_local_dir("SOURCE_DOCUMENTS", remote_path="/root/SOURCE_DOCUMENTS")]))
 
-stub = Stub(name="localgpt-db", image=image)
+volume = NetworkFileSystem.persisted("modal_vol")
 
-CACHE_DIR = "/DB"
+CACHE_PATH = "/root/.cache"
 
-# @stub.cls(gpu=gpu.A100(), timeout=60 * 10, container_idle_timeout=60 * 5)
-# class Falcon40BGPTQ:
-#     def __enter__(self):
-#         from transformers import AutoTokenizer
-#         from auto_gptq import AutoGPTQForCausalLM
+stub = Stub(name="localgpt-db-with-model", image=image)
 
-#         self.tokenizer = AutoTokenizer.from_pretrained(
-#             IMAGE_MODEL_DIR, use_fast=True
-#         )
-#         print("Loaded tokenizer.")
+@stub.function(gpu="any", network_file_systems={CACHE_PATH: volume})
+def modal_function():
 
-#         self.model = AutoGPTQForCausalLM.from_quantized(
-#             IMAGE_MODEL_DIR,
-#             trust_remote_code=True,
-#             use_safetensors=True,
-#             device_map="auto",
-#             use_triton=False,
-#             strict=False,
-#         )
-#         print("Loaded model.")
+    from langchain.embeddings import HuggingFaceInstructEmbeddings
+    from langchain.vectorstores import Chroma
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    embeddings = HuggingFaceInstructEmbeddings(model_name=EMBEDDING_MODEL_NAME, model_kwargs={"device": "cuda"})
 
-#     @method()
-#     def generate(self, prompt: str):
-#         from threading import Thread
-#         from transformers import TextIteratorStreamer
+    db = Chroma(
+        persist_directory=PERSIST_DIRECTORY,
+        embedding_function=embeddings,
+        client_settings=CHROMA_SETTINGS,
+    )
 
-#         inputs = self.tokenizer(prompt, return_tensors="pt")
-#         streamer = TextIteratorStreamer(
-#             self.tokenizer, skip_special_tokens=True
-#         )
-#         generation_kwargs = dict(
-#             inputs=inputs.input_ids.cuda(),
-#             attention_mask=inputs.attention_mask,
-#             temperature=0.1,
-#             max_new_tokens=512,
-#             streamer=streamer,
-#         )
+    retriever = db.as_retriever()
 
-#         # Run generation on separate thread to enable response streaming.
-#         thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
-#         thread.start()
-#         for new_text in streamer:
-#             yield new_text
+    start = time.time()
+    tokenizer = AutoTokenizer.from_pretrained(model_id, use_cache=True)
+    end = time.time()
+    print("setting up Autotokenizer...", end - start)
+    #setting up Autotokenizer... 150.63580632209778
 
-#         thread.join()
+    start = time.time()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,  
+        use_cache=True,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+            # max_memory={0: "15GB"} # Uncomment this line with you encounter CUDA out of memory errors
+        )
+    end = time.time()
+    print("AutoModelForCausalLM...", end - start)
+    #AutoModelForCausalLM... 67.84899544715881
 
-# prompt_template = (
-#     "A chat between a curious human user and an artificial intelligence assistant. The assistant give a helpful, detailed, and accurate answer to the user's question."
-#     "\n\nUser:\n{}\n\nAssistant:\n"
-# )
+    model.tie_weights()
 
+    generation_config = GenerationConfig.from_pretrained(model_id, use_cache=True)  
+
+    pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_length=2048,
+        temperature=0,
+        top_p=0.95,
+        repetition_penalty=1.15,
+        generation_config=generation_config,
+    )
+
+    llm = HuggingFacePipeline(pipeline=pipe)
+
+    qa = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=True, device_map="auto",)
+    
+    question = "All legislative Powers herein granted shall be vested in a..."
+
+
+    res = qa(question)
+    answer, docs = res["result"], res["source_documents"]
+
+    print(">>>> answer", answer)
+
+    #print(docs)
+    return answer  
 
 @stub.local_entrypoint()
 def cli():
-    question = "who painted the gioconda"
-    #model = Falcon40BGPTQ()
-    print("runnin model")
-    #for text in model.generate.call(prompt_template.format(question)):
-    #    print(text, end="", flush=True)
+    modal_function.call()
 
-#@stub.function(timeout=60 * 10)
-#@web_endpoint()
-# def get(question: str):
-#     from fastapi.responses import StreamingResponse
-#     from itertools import chain
 
-#     model = Falcon40BGPTQ()
 #     return StreamingResponse(
 #         chain(
 #             ("Loading model. This usually takes around 20s ...\n\n"),
 #             model.generate.call(prompt_template.format(question)),
 #         ),
 #         media_type="text/event-stream",
-    
+
+@stub.function()#timeout??
+@web_endpoint()
+def get():
+    logging.info("hitting end point")
+    return modal_function.call()
