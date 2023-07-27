@@ -35,8 +35,6 @@ IMAGE_MODEL_DIR = "/model"
 model_id = "TheBloke/vicuna-7B-1.1-HF"
 model_basename = None
 
-volume = NetworkFileSystem.persisted("model-cache-vol")
-
 def load_single_document(file_path: str) -> Document:
     # Loads a single document from a file path
     file_extension = os.path.splitext(file_path)[1]
@@ -102,11 +100,18 @@ def split_documents(documents: list[Document]) -> tuple[list[Document], list[Doc
 
     return text_docs #, python_docs
 
+VOLUME_DIR = "/root/cache-volume"
+TOKENIZER_CACHE_PATH = "/root/cache-volume/tokenizer"
+MODEL_CACHE_PATH = "/root/cache-volume/automodel"
+GENERATION_CACHE_PATH = "/root/cache-volume/generation"
+
+volume = NetworkFileSystem.persisted("cache_volume")
 
 def presist_db_run_model():
     from langchain.embeddings import HuggingFaceInstructEmbeddings
     from langchain.vectorstores import Chroma
-    from transformers import AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+    import torch
     
     documents = load_documents(SOURCE_DIRECTORY)
     text_documents = split_documents(documents)
@@ -127,6 +132,21 @@ def presist_db_run_model():
 
     db.persist()
     db = None
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer.save_pretrained(TOKENIZER_CACHE_PATH)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,  
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+            # max_memory={0: "15GB"} # Uncomment this line with you encounter CUDA out of memory errors
+        )
+    model.save_pretrained(MODEL_CACHE_PATH)
+
+    generation_config = GenerationConfig.from_pretrained(model_id, use_cache=True)
+    generation_config.save_pretrained(GENERATION_CACHE_PATH)
 
 image = (
     Image.debian_slim(python_version="3.10")
@@ -155,20 +175,21 @@ image = (
     )
     #.env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
     # #Mount.from_local_dir("DB", remote_path="/root/DB")
-    .run_function(presist_db_run_model, gpu="any", mounts=[Mount.from_local_dir("SOURCE_DOCUMENTS", remote_path="/root/SOURCE_DOCUMENTS")]))
+    .run_function(presist_db_run_model, gpu="any", network_file_systems={VOLUME_DIR: volume}, mounts=[Mount.from_local_dir("SOURCE_DOCUMENTS", remote_path="/root/SOURCE_DOCUMENTS")]))
 
-volume = NetworkFileSystem.persisted("cache_volume")
 
-CACHE_PATH = "/root/.cache"
+
+
 
 stub = Stub(name="localgpt-db-with-model", image=image)
 
-@stub.function(gpu="any", network_file_systems={CACHE_PATH: volume})
+@stub.function(gpu="any", network_file_systems={VOLUME_DIR: volume}, timeout=500)
 def modal_function():
 
     from langchain.embeddings import HuggingFaceInstructEmbeddings
     from langchain.vectorstores import Chroma
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, AutoConfig
+    import torch
     embeddings = HuggingFaceInstructEmbeddings(model_name=EMBEDDING_MODEL_NAME, model_kwargs={"device": "cuda"})
 
     db = Chroma(
@@ -180,26 +201,22 @@ def modal_function():
     retriever = db.as_retriever()
 
     start = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(model_id, use_cache=True)
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_CACHE_PATH)
     end = time.time()
     print("setting up Autotokenizer...", end - start)
 
     start = time.time()
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,  
-        use_cache=True,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-            # max_memory={0: "15GB"} # Uncomment this line with you encounter CUDA out of memory errors
-        )
+    model = AutoModelForCausalLM.from_pretrained(MODEL_CACHE_PATH, 
+                                                 torch_dtype=torch.float16,
+                                                 low_cpu_mem_usage=True,
+                                                 trust_remote_code=True, config=AutoConfig.from_pretrained(MODEL_CACHE_PATH))
     end = time.time()
     print("AutoModelForCausalLM...", end - start)
     #AutoModelForCausalLM... 67.84899544715881
 
     model.tie_weights()
 
-    generation_config = GenerationConfig.from_pretrained(model_id, use_cache=True)  
+    generation_config = GenerationConfig.from_pretrained(GENERATION_CACHE_PATH)  
 
     pipe = pipeline(
         "text-generation",
