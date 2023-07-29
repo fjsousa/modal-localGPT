@@ -9,7 +9,7 @@ from langchain.docstore.document import Document
 from langchain.text_splitter import Language, RecursiveCharacterTextSplitter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
-from langchain.llms import HuggingFacePipeline
+from langchain.llms import HuggingFacePipeline, LlamaCpp
 from langchain.chains import RetrievalQA
 
 from transformers import (
@@ -32,8 +32,9 @@ from constants import (
 
 IMAGE_MODEL_DIR = "/model"
 
-model_id = "TheBloke/vicuna-7B-1.1-HF"
-model_basename = None
+model_id = "TheBloke/Llama-2-7B-Chat-GGML"
+model_basename = "llama-2-7b-chat.ggmlv3.q4_0.bin"
+device_type = "cuda"
 
 def load_single_document(file_path: str) -> Document:
     # Loads a single document from a file path
@@ -100,18 +101,14 @@ def split_documents(documents: list[Document]) -> tuple[list[Document], list[Doc
 
     return text_docs #, python_docs
 
-VOLUME_DIR = "/root/cache-volume"
-TOKENIZER_CACHE_PATH = "/root/cache-volume/tokenizer"
-MODEL_CACHE_PATH = "/root/cache-volume/automodel"
-GENERATION_CACHE_PATH = "/root/cache-volume/generation"
-
-volume = NetworkFileSystem.persisted("cache_volume")
+cache_path = "/vol/cache-volume"
 
 def presist_db_run_model():
     from langchain.embeddings import HuggingFaceInstructEmbeddings
     from langchain.vectorstores import Chroma
     from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
     import torch
+    from huggingface_hub import hf_hub_download
     
     documents = load_documents(SOURCE_DIRECTORY)
     text_documents = split_documents(documents)
@@ -132,26 +129,19 @@ def presist_db_run_model():
 
     db.persist()
     db = None
+    
+    start = time.time()
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    tokenizer.save_pretrained(TOKENIZER_CACHE_PATH)
+    hf_hub_download(repo_id=model_id, filename=model_basename, cache_dir=cache_path)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,  
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-            # max_memory={0: "15GB"} # Uncomment this line with you encounter CUDA out of memory errors
-        )
-    model.save_pretrained(MODEL_CACHE_PATH)
-
-    generation_config = GenerationConfig.from_pretrained(model_id, use_cache=True)
-    generation_config.save_pretrained(GENERATION_CACHE_PATH)
+    end = time.time()
+    print("saved model onto image", end - start)
 
 image = (
     Image.debian_slim(python_version="3.10")
     .apt_install("git")
     .pip_install(
+        "accelerate",
         "langchain==0.0.191",
         "chromadb==0.3.22",
         "pdfminer.six==20221105",
@@ -163,89 +153,110 @@ image = (
         "protobuf==3.20.0; sys_platform != 'darwin'",
         "protobuf==3.20.0; sys_platform == 'darwin' and platform_machine != 'arm64'",
         "protobuf==3.20.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
-        "auto-gptq",
+        "llama-cpp-python==0.1.66",
+        "auto-gptq==0.2.2",
         "docx2txt",
         "urllib3==1.26.6",
-        "accelerate",
         "bitsandbytes",
         "click",
         "flask",
         "requests",
         "openpyxl"
-    )
+    ).pip_install("xformers", pre=True)
     #.env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
     # #Mount.from_local_dir("DB", remote_path="/root/DB")
-    .run_function(presist_db_run_model, gpu="any", network_file_systems={VOLUME_DIR: volume}, mounts=[Mount.from_local_dir("SOURCE_DOCUMENTS", remote_path="/root/SOURCE_DOCUMENTS")]))
+    .run_function(presist_db_run_model, gpu="A10G", mounts=[Mount.from_local_dir("SOURCE_DOCUMENTS", remote_path="/root/SOURCE_DOCUMENTS")]))
 
+stub = Stub(name="localgpt-superconductor", image=image)
 
+def load_model(device_type, model_id, model_basename=None):
+    from langchain.llms import LlamaCpp
+    from huggingface_hub import hf_hub_download
+    """
+    """
+    logging.info(f"Loading Model: {model_id}, on: {device_type}")
+    logging.info("This action can take a few minutes!")
 
-
-
-stub = Stub(name="localgpt-db-with-model", image=image)
-
-@stub.function(gpu="any", network_file_systems={VOLUME_DIR: volume}, timeout=500)
-def modal_function():
-
-    from langchain.embeddings import HuggingFaceInstructEmbeddings
-    from langchain.vectorstores import Chroma
-    from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, AutoConfig
-    import torch
-    embeddings = HuggingFaceInstructEmbeddings(model_name=EMBEDDING_MODEL_NAME, model_kwargs={"device": "cuda"})
-
-    db = Chroma(
-        persist_directory=PERSIST_DIRECTORY,
-        embedding_function=embeddings,
-        client_settings=CHROMA_SETTINGS,
-    )
-
-    retriever = db.as_retriever()
+    # Only supporting - if model_basename is not None:
+        #if ".ggml" in model_basename:
+    logging.info("Using Llamacpp for GGML quantized models")
 
     start = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_CACHE_PATH)
+    model_path = hf_hub_download(repo_id=model_id, filename=model_basename, cache_dir=cache_path)
     end = time.time()
-    print("setting up Autotokenizer...", end - start)
+    print("Loading LLM at __enter__...", end - start)
 
-    start = time.time()
-    model = AutoModelForCausalLM.from_pretrained(MODEL_CACHE_PATH, 
-                                                 torch_dtype=torch.float16,
-                                                 low_cpu_mem_usage=True,
-                                                 trust_remote_code=True, config=AutoConfig.from_pretrained(MODEL_CACHE_PATH))
-    end = time.time()
-    print("AutoModelForCausalLM...", end - start)
-    #AutoModelForCausalLM... 67.84899544715881
+    max_ctx_size = 2048
+    kwargs = {
+        "model_path": model_path,
+        "n_ctx": max_ctx_size,
+        "max_tokens": max_ctx_size,
+        "n_gpu_layers": 1000,
+        "n_batch": max_ctx_size
+    }
 
-    model.tie_weights()
+    return LlamaCpp(**kwargs)
 
-    generation_config = GenerationConfig.from_pretrained(GENERATION_CACHE_PATH)  
+@stub.cls(gpu="A10G", timeout=1500)
+class Model:
 
-    pipe = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_length=2048,
-        temperature=0,
-        top_p=0.95,
-        repetition_penalty=1.15,
-        generation_config=generation_config,
-    )
+    def  __enter__(self):
+        from langchain.embeddings import HuggingFaceInstructEmbeddings
+        from langchain.vectorstores import Chroma
+        from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, AutoConfig
+        import torch
+        embeddings = HuggingFaceInstructEmbeddings(model_name=EMBEDDING_MODEL_NAME, model_kwargs={"device": "cuda"})
 
-    llm = HuggingFacePipeline(pipeline=pipe)
+        # 2. Loads vector store
+        self.db = Chroma(
+            persist_directory=PERSIST_DIRECTORY,
+            embedding_function=embeddings,
+            client_settings=CHROMA_SETTINGS,
+        )
 
-    qa = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=True, device_map="auto",)
+        self.retriever = self.db.as_retriever()
+
+        # 3. Loads LLM
+        start = time.time()
+        self.llm = load_model(device_type, model_id=model_id, model_basename=model_basename)
+        end = time.time()
+        print("Loading LLM...", end - start)
+
+    @method()
+    def run_inference(self, question):
+        from langchain.llms import HuggingFacePipeline
+        from transformers import pipeline
+        from langchain.chains import RetrievalQA
+
+        llm = self.llm
+
+        qa = RetrievalQA.from_chain_type(
+            llm=llm, 
+            chain_type="stuff", 
+            retriever=self.retriever, 
+            return_source_documents=True,
+            )
+
+        start = time.time()
+        res = qa(question)
+        end = time.time()
+        print("qa(question) took....", end - start)  
+        answer, docs = res["result"], res["source_documents"]
+
+        #print(docs)
+        return {"answer": answer, "docs": docs}# + "\n" + docs[0].metadata["source"] + "\n" + docs[0].page_content 
     
-    question = "All legislative Powers herein granted shall be vested in a..."
 
-
-    res = qa(question)
-    answer, docs = res["result"], res["source_documents"]
-
-    #print(docs)
-    return answer  
 
 @stub.local_entrypoint()
 def cli():
-    modal_function.call()
-
+    import time
+    start = time.time()
+    question = "All legislative Powers herein granted shall be vested in a..."
+    res = Model.run_inference.call(question)
+    end = time.time()
+    print("cli run time", end - start)
+    return res
 
 #     return StreamingResponse(
 #         chain(
@@ -256,7 +267,13 @@ def cli():
 
 @stub.function()#timeout??
 @web_endpoint()
-def get():
-    res = modal_function.call()
-    print(">>>>", res)
-    return "Hello world"
+def get(question: str):
+    import time
+    start = time.time()
+    #question = "All legislative Powers herein granted shall be vested in a..."
+
+    print("question: ", question)
+    res = Model.run_inference.call(question)
+    end = time.time()
+    print("endpoint run time", end - start)
+    return res
