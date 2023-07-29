@@ -2,24 +2,27 @@ from modal import Image, Stub, gpu, method, web_endpoint, NetworkFileSystem
 import torch
 
 model_id = "TheBloke/vicuna-7B-1.1-HF"
-
-VOLUME_DIR = "/root/cache-volume"
-MODEL_CACHE_PATH = "/root/cache-volume/automodel"
-
-volume = NetworkFileSystem.persisted("cache_volume")
+cache_path = "/vol/cache"
 
 def image_setup_with_model_local_save():
     from transformers import AutoModelForCausalLM
+    import time
+
+    start = time.time()
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,  
         torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
+        #low_cpu_mem_usage=True,
         trust_remote_code=True,
+        cache_dir=cache_path,
+        #subfolder="automodel",
             # max_memory={0: "15GB"} # Uncomment this line with you encounter CUDA out of memory errors
         )
     
-    model.save_pretrained(MODEL_CACHE_PATH)
+    model.save_pretrained(cache_path, safe_serialization=True)
+    end = time.time()
+    print("saved model into image", end - start)
 
 image = (
     Image.debian_slim(python_version="3.10")
@@ -46,33 +49,49 @@ image = (
         "requests",
         "openpyxl"
     )
-    .run_function(image_setup_with_model_local_save, gpu="any", network_file_systems={VOLUME_DIR: volume}))
+    .run_function(image_setup_with_model_local_save, gpu="any"))
 
 
 stub = Stub(name="just-model-local-save-2", image=image)
 
-@stub.function(gpu="any", network_file_systems={VOLUME_DIR : volume}, timeout=500)
-def modal_function():
-    import time
-    from transformers import AutoModelForCausalLM, AutoConfig
+@stub.cls(gpu="any", timeout=5000)
+class Model:
 
-    print(">> model load...")
-    start = time.time()
-    model = AutoModelForCausalLM.from_pretrained(MODEL_CACHE_PATH, 
-                                                 torch_dtype=torch.float16,
-                                                 low_cpu_mem_usage=True,
-                                                 trust_remote_code=True, config=AutoConfig.from_pretrained(MODEL_CACHE_PATH)
-                                                 )
-    end = time.time()
-    print("AutoModelForCausalLM...", end - start)
-    return "ok"
+
+    def  __enter__(self):
+        import time
+        from transformers import AutoModelForCausalLM, AutoConfig
+        start = time.time()
+        self.model = AutoModelForCausalLM.from_pretrained(
+            cache_path,
+            #subfolder="automodel",
+            low_cpu_mem_usage=True,   
+            torch_dtype=torch.float16,
+            #low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+        end = time.time()
+        print("AutoModelForCausalLM at __enter__...", end - start)
+
+    #loads model and replies "ok"
+    @method()
+    def echo(self):
+        bla = self.model
+        return "ok"
 
 @stub.local_entrypoint()
 def cli():
-    print(modal_function.call())
+    import time
+    start = time.time()
+    Model().echo.call()
+    end = time.time()
+    print("cli load time...", end - start)
 
 @stub.function()
 @web_endpoint()
 def get():
-    res = modal_function.call()
-    return res
+    import time
+    start = time.time()
+    Model().echo.call()
+    end = time.time()
+    print("get load time", end - start)
