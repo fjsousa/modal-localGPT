@@ -6,7 +6,7 @@ from modal import Image, Stub, gpu, method, web_endpoint, NetworkFileSystem, Mou
 import torch
 
 from langchain.docstore.document import Document
-from langchain.text_splitter import Language, RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 from langchain.llms import HuggingFacePipeline, LlamaCpp
@@ -32,9 +32,15 @@ from constants import (
 
 IMAGE_MODEL_DIR = "/model"
 
-model_id = "TheBloke/Llama-2-7B-Chat-GGML"
-model_basename = "llama-2-7b-chat.ggmlv3.q4_0.bin"
+
+model_id = "TheBloke/wizard-vicuna-13B-GGML"
+#model_basename = "wizard-vicuna-13B.ggmlv3.q4_0.bin"
+#model_id = "TheBloke/Llama-2-7B-Chat-GGML"
+#model_basename = "llama-2-7b-chat.ggmlv3.q4_0.bin"
+model_id = "TheBloke/orca_mini_3B-GGML"
+model_basename = "orca-mini-3b.ggmlv3.q4_0.bin"
 device_type = "cuda"
+
 
 def load_single_document(file_path: str) -> Document:
     # Loads a single document from a file path
