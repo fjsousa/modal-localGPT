@@ -1,8 +1,4 @@
 Just trying to get [localGPT](https://github.com/PromtEngineer/localGPT) to run on Cloud Based GPUs. Runs on [modal.com](https://modal.com).
-```
-model_id = "TheBloke/Llama-2-7B-Chat-GGML"
-model_basename = "llama-2-7b-chat.ggmlv3.q4_0.bin"
-```
 
 ## Run/deploy
 
