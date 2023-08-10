@@ -33,12 +33,12 @@ from constants import (
 IMAGE_MODEL_DIR = "/model"
 
 
-model_id = "TheBloke/wizard-vicuna-13B-GGML"
+#model_id = "TheBloke/wizard-vicuna-13B-GGML"
 #model_basename = "wizard-vicuna-13B.ggmlv3.q4_0.bin"
-#model_id = "TheBloke/Llama-2-7B-Chat-GGML"
-#model_basename = "llama-2-7b-chat.ggmlv3.q4_0.bin"
-model_id = "TheBloke/orca_mini_3B-GGML"
-model_basename = "orca-mini-3b.ggmlv3.q4_0.bin"
+model_id = "TheBloke/Llama-2-7B-Chat-GGML"
+model_basename = "llama-2-7b-chat.ggmlv3.q4_0.bin"
+#model_id = "TheBloke/orca_mini_3B-GGML"
+#model_basename = "orca-mini-3b.ggmlv3.q4_0.bin"
 device_type = "cuda"
 
 
@@ -135,7 +135,7 @@ def presist_db_run_model():
 
     db.persist()
     db = None
-    
+
     start = time.time()
 
     hf_hub_download(repo_id=model_id, filename=model_basename, cache_dir=cache_path)
@@ -153,7 +153,7 @@ image = (
         "pdfminer.six==20221105",
         "InstructorEmbedding",
         "sentence-transformers",
-        "faiss-cpu",    
+        "faiss-cpu",
         "huggingface_hub",
         "transformers",
         "protobuf==3.20.0; sys_platform != 'darwin'",
@@ -203,7 +203,7 @@ def load_model(device_type, model_id, model_basename=None):
 
     return LlamaCpp(**kwargs)
 
-@stub.cls(gpu="A10G", timeout=1500)
+@stub.cls(gpu="T4", timeout=1500, allow_concurrent_inputs=10, concurrency_limit=5)
 class Model:
 
     def  __enter__(self):
@@ -237,21 +237,21 @@ class Model:
         llm = self.llm
 
         qa = RetrievalQA.from_chain_type(
-            llm=llm, 
-            chain_type="stuff", 
-            retriever=self.retriever, 
+            llm=llm,
+            chain_type="stuff",
+            retriever=self.retriever,
             return_source_documents=True,
             )
 
         start = time.time()
         res = qa(question)
         end = time.time()
-        print("qa(question) took....", end - start)  
+        print("qa(question) took....", end - start)
         answer, docs = res["result"], res["source_documents"]
 
         #print(docs)
-        return {"answer": answer, "docs": docs}# + "\n" + docs[0].metadata["source"] + "\n" + docs[0].page_content 
-    
+        return {"answer": answer, "docs": docs}# + "\n" + docs[0].metadata["source"] + "\n" + docs[0].page_content
+
 
 
 @stub.local_entrypoint()
