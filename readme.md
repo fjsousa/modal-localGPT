@@ -1,12 +1,11 @@
-Based on [localGPT](https://github.com/PromtEngineer/localGPT) but only for Llama-7B atm.
+Just trying to get [localGPT](https://github.com/PromtEngineer/localGPT) to run on Cloud Based GPUs. Runs on [modal.com](https://modal.com).
 
-Runs on [modal.com](https://modal.com).
 ```
 model_id = "TheBloke/Llama-2-7B-Chat-GGML"
 model_basename = "llama-2-7b-chat.ggmlv3.q4_0.bin"
+```
 
 Replies in less than 10 secs with answer and source documents, when instance is warmed up.
-```
 
 ## Run/deploy
 
@@ -27,7 +26,7 @@ real	1m45.259s
 user	0m0.135s
 sys	0m0.031s
 
- 
+
 $ time curl -sG https://fjsousa--localgpt-superconductor-get.modal.run --data-urlencode 'question=based on the paper I provided whats lk-99 in one short sentence' | jq ".answer"
 " Based on the paper you provided, LK-99 is a new compound discovered to exhibit room temperature superconductivity."
 
